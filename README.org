@@ -1,0 +1,27 @@
+* Usage
+
+This repository contains two scripts:
+
+- compute_availability.py :: Compute available timeslots from an ICS
+  calendar file.
+- ics_export.py :: Export ICS calendar file to HTML or ASCII text format.
+
+Assuming you have =calendar.ics=, you can create HTML and ASCII pages
+displaying your availability like this:
+
+: ~$ compute_availability.py ~/calendar.ics > ~/available.ics
+: ~$ ics_export.py ~/available.ics --format ascii > ~/agenda.txt
+: ~$ ics_export.py ~/available.ics --format html > ~/agenda.html
+
+The script uses the following default values, defined as constants at
+the top of the file:
+
+| Constant        | Default      | Description                         |
+|-----------------+--------------+-------------------------------------|
+| =DEFAULT_TZ=      | =Europe/Paris= | Timezone for date/time calculations |
+| =WORK_START_TIME= | =13:30=        | Start of daily availability window  |
+| =WORK_END_TIME=   | =17:00=        | End of daily availability window    |
+
+* License 
+
+The code in this repository is published under the [[LICENSE][Expat license]] (aka MIT).
