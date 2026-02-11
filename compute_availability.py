@@ -20,6 +20,7 @@ from dateutil.rrule import rrulestr
 DEFAULT_TZ = ZoneInfo('Europe/Paris')
 WORK_START_TIME = time(hour=13, minute=30)
 WORK_END_TIME = time(hour=17, minute=0)
+AVAILABILITY_LEAD_DAYS = 3  # Working days before availability starts
 
 
 def parse_ics(filename: str) -> Calendar:
@@ -125,11 +126,11 @@ def generate_working_hours(start_date: datetime, end_date: datetime) -> List[Tup
 
 
 def calculate_availability_start_date(base_date: datetime) -> datetime:
-    """Calculate availability start date as today + 3 working days.
+    """Calculate availability start date as today + AVAILABILITY_LEAD_DAYS working days.
 
     Working days exclude weekends (Saturday and Sunday).
 
-    Examples:
+    Examples (with AVAILABILITY_LEAD_DAYS=3):
         - If today is Tuesday -> Friday (Tue+1=Wed, Wed+1=Thu, Thu+1=Fri)
         - If today is Saturday -> Wednesday (skip Sat/Sun, Mon+1=Tue, Tue+1=Wed)
         - If today is Sunday -> Wednesday (skip Sun, Mon+1=Tue, Tue+1=Wed)
@@ -137,7 +138,7 @@ def calculate_availability_start_date(base_date: datetime) -> datetime:
     current = base_date.date()
     working_days_added = 0
 
-    while working_days_added < 3:
+    while working_days_added < AVAILABILITY_LEAD_DAYS:
         current += timedelta(days=1)
         if current.weekday() < 5:
             working_days_added += 1
@@ -274,7 +275,7 @@ def main():
     end_date = start_date + timedelta(weeks=weeks_ahead)
 
     print(f"Today: {today.date()}", file=sys.stderr)
-    print(f"Availability starts on: {start_date.date()} (today + 3 working days)", file=sys.stderr)
+    print(f"Availability starts on: {start_date.date()} (today + {AVAILABILITY_LEAD_DAYS} working days)", file=sys.stderr)
     print(f"Processing calendar from {start_date.date()} to {end_date.date()}", file=sys.stderr)
 
     # Parse input calendar
