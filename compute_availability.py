@@ -20,7 +20,7 @@ from dateutil.rrule import rrulestr
 DEFAULT_TZ = ZoneInfo('Europe/Paris')
 WORK_START_TIME = time(hour=13, minute=30)
 WORK_END_TIME = time(hour=17, minute=0)
-AVAILABILITY_LEAD_DAYS = 3  # Working days before availability starts
+AVAILABILITY_LEAD_DAYS = 3
 
 
 def parse_ics(filename: str) -> Calendar:

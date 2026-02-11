@@ -16,11 +16,12 @@ displaying your availability like this:
 The script uses the following default values, defined as constants at
 the top of the file:
 
-| Constant        | Default      | Description                         |
-|-----------------+--------------+-------------------------------------|
-| =DEFAULT_TZ=      | =Europe/Paris= | Timezone for date/time calculations |
-| =WORK_START_TIME= | =13:30=        | Start of daily availability window  |
-| =WORK_END_TIME=   | =17:00=        | End of daily availability window    |
+| Constant               | Default      | Description                             |
+|------------------------+--------------+-----------------------------------------|
+| =DEFAULT_TZ=             | =Europe/Paris= | Timezone for date/time calculations     |
+| =WORK_START_TIME=        | =13:30=        | Start of daily availability window      |
+| =WORK_END_TIME=          | =17:00=        | End of daily availability window        |
+| AVAILABILITY_LEAD_DAYS | 3            | Working days before availability starts |
 
 * License 
 
