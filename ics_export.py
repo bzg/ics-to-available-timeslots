@@ -3,6 +3,7 @@
 Export ICS calendar file to HTML or ASCII text format.
 """
 
+import os
 import sys
 from datetime import datetime, timedelta, time
 from typing import List, Dict
@@ -68,8 +69,10 @@ def get_week_start(dates: Dict) -> datetime:
     return first_event['start'] - timedelta(days=first_event['start'].weekday())
 
 
-def generate_ascii(events: List[Dict], title: str = "Bastien's Available Time Slots") -> str:
+def generate_ascii(events: List[Dict], title: str = None) -> str:
     """Generate ASCII text representation of events."""
+    if title is None:
+        title = os.environ.get('TITLE', "Available Time Slots")
     if not events:
         return "No available time slots found.\n"
 
@@ -105,9 +108,13 @@ def generate_ascii(events: List[Dict], title: str = "Bastien's Available Time Sl
     return "\n".join(lines)
 
 
-def generate_html(events: List[Dict], title: str = "Bastien's Available Time Slots") -> str:
+def generate_html(events: List[Dict], title: str = None) -> str:
     """Generate HTML page from events and return as string."""
+    if title is None:
+        title = os.environ.get('TITLE', "Available Time Slots")
     generated_at = datetime.now().strftime('%Y-%m-%d at %H:%M')
+    ical_url = os.environ.get('ICAL_URL', 'https://bzg.fr/agenda.ics')
+    visio_url = os.environ.get('VISIO_URL', 'https://rendez-vous.renater.fr/swh-partnerships')
 
     # Build events HTML
     if not events:
@@ -214,7 +221,7 @@ def generate_html(events: List[Dict], title: str = "Bastien's Available Time Slo
     <div class="container">
         <header>
             <h1>{title}</h1>
-            <p><strong><a href="https://bzg.fr/agenda.ics">iCal file</a></strong></p>
+            <p><strong><a href="{ical_url}">iCal file</a> - <a href="{visio_url}">Visio link</a></strong></p>
         </header>
 {events_html}
         <footer>
@@ -233,7 +240,7 @@ def main():
         print("  input.ics       Input ICS file (use '-' for stdin)", file=sys.stderr)
         print("  --format        Output format: html or ascii (default: html)", file=sys.stderr)
         print("  output_file     Output file (default: stdout, use '-' for stdout)", file=sys.stderr)
-        print("  title           Title for the output (default: \"Bastien's Available Time Slots\")", file=sys.stderr)
+        print("  title           Title for the output (default: \"Available Time Slots\")", file=sys.stderr)
         print("\nExamples:", file=sys.stderr)
         print("  python ics_export.py input.ics                          # HTML to stdout", file=sys.stderr)
         print("  python ics_export.py input.ics --format ascii           # ASCII to stdout", file=sys.stderr)
@@ -246,7 +253,7 @@ def main():
     input_file = sys.argv[1]
     output_format = "html"
     output_file = None
-    title = "Bastien's Available Time Slots"
+    title = None
 
     i = 2
     while i < len(sys.argv):

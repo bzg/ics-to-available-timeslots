@@ -16,12 +16,16 @@ displaying your availability like this:
 The script uses the following default values, defined as constants at
 the top of the file:
 
-| Constant               | Default      | Description                             |
-|------------------------+--------------+-----------------------------------------|
-| =DEFAULT_TZ=             | =Europe/Paris= | Timezone for date/time calculations     |
-| =WORK_START_TIME=        | =13:30=        | Start of daily availability window      |
-| =WORK_END_TIME=          | =17:00=        | End of daily availability window        |
-| =AVAILABILITY_LEAD_DAYS= | =3=            | Working days before availability starts |
+| Constant               | Default                                         | Description                             |
+|------------------------+-------------------------------------------------+-----------------------------------------|
+| =DEFAULT_TZ=             | =Europe/Paris=                                    | Timezone for date/time calculations     |
+| =WORK_START_TIME=        | =13:30=                                           | Start of daily availability window      |
+| =WORK_END_TIME=          | =17:00=                                           | End of daily availability window        |
+| =AVAILABILITY_LEAD_DAYS= | =3=                                               | Working days before availability starts |
+|------------------------+-------------------------------------------------+-----------------------------------------|
+| =TITLE=                  | =Available Time Slots=                            | Title of the HTML export                |
+| =ICAL_URL=               | =https://bzg.fr/agenda.ics=                       | iCal URL of the agenda                  |
+| =VISIO_URL=              | =https://rendez-vous.renater.fr/swh-partnerships= | URL of the visio link                   |
 
 * License 
 
