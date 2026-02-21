@@ -3,324 +3,357 @@
 Compute available timeslots from an ICS calendar file.
 
 Assumptions:
-- Not available on weekends (Saturday-Sunday)
-- Working hours: Monday-Friday, 1:30 PM - 5:00 PM (13:30-17:00)
+- Not available on weekends (Saturday and Sunday).
+- Working hours: Monday-Friday, 1:30 PM - 5:00 PM (13:30-17:00).
+
+Configuration via environment variables:
+- WORK_START       Working day start time (default: "13:30")
+- WORK_END         Working day end time (default: "17:00")
+- LEAD_DAYS        Working days to skip before first available slot (default: 3)
+- BUFFER_MINUTES   Break around each appointment in minutes (default: 10)
+- MIN_SLOT_MINUTES Minimum slot duration to keep in minutes (default: 44)
+- TZ               Timezone (default: "Europe/Paris")
 """
 
+from __future__ import annotations
+
+import argparse
+import logging
+import os
 import sys
 from bisect import bisect_left
-from datetime import datetime, timedelta, time
-from typing import List, Tuple
+from dataclasses import dataclass
+from datetime import datetime, date, time, timedelta
+from typing import Generator, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
-from icalendar import Calendar, Event
 from dateutil.rrule import rrulestr
+from icalendar import Calendar, Event
 
-# Constants
-DEFAULT_TZ = ZoneInfo('Europe/Paris')
-WORK_START_TIME = time(hour=13, minute=30)
-WORK_END_TIME = time(hour=17, minute=0)
-AVAILABILITY_LEAD_DAYS = 3
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Type alias
+# ---------------------------------------------------------------------------
+Interval = tuple[datetime, datetime]
 
 
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+def _parse_time(val: str) -> time:
+    """Parse 'HH:MM' into a time object."""
+    h, m = val.split(":")
+    return time(hour=int(h), minute=int(m))
+
+
+@dataclass(frozen=True)
+class Config:
+    """All tuneable knobs, loaded from environment with sensible defaults."""
+
+    tz: ZoneInfo
+    work_start: time
+    work_end: time
+    lead_days: int
+    buffer_minutes: int
+    min_slot_minutes: int
+
+    @classmethod
+    def from_env(cls) -> Config:
+        return cls(
+            tz=ZoneInfo(os.environ.get("TZ", "Europe/Paris")),
+            work_start=_parse_time(os.environ.get("WORK_START", "13:30")),
+            work_end=_parse_time(os.environ.get("WORK_END", "17:00")),
+            lead_days=int(os.environ.get("LEAD_DAYS", "3")),
+            buffer_minutes=int(os.environ.get("BUFFER_MINUTES", "10")),
+            min_slot_minutes=int(os.environ.get("MIN_SLOT_MINUTES", "44")),
+        )
+
+
+# ---------------------------------------------------------------------------
+# ICS helpers
+# ---------------------------------------------------------------------------
 def parse_ics(filename: str) -> Calendar:
     """Parse an ICS file and return the Calendar object."""
-    with open(filename, 'rb') as f:
+    with open(filename, "rb") as f:
         return Calendar.from_ical(f.read())
 
 
-def get_datetime_with_tz(dt, default_tz: ZoneInfo = DEFAULT_TZ) -> datetime:
-    """Ensure datetime has timezone information."""
+def _ensure_datetime(dt: datetime | date, tz: ZoneInfo) -> datetime:
+    """Normalise a date or naive datetime to a timezone-aware datetime."""
     if not isinstance(dt, datetime):
-        # It's a date object, convert to datetime at start of day
         dt = datetime.combine(dt, time.min)
-    
-    return dt if dt.tzinfo else dt.replace(tzinfo=default_tz)
+    return dt if dt.tzinfo else dt.replace(tzinfo=tz)
 
 
-def expand_recurring_events(event, start_date: datetime, end_date: datetime) -> List[Tuple[datetime, datetime]]:
-    """Expand a recurring event into individual occurrences."""
-    dtstart = get_datetime_with_tz(event.get('DTSTART').dt)
-    dtend = get_datetime_with_tz(event.get('DTEND').dt)
-    rrule = event.get('RRULE')
+def _expand_event(
+    event: Event, window_start: datetime, window_end: datetime, tz: ZoneInfo
+) -> Generator[Interval, None, None]:
+    """Yield (start, end) pairs for every occurrence of *event* inside the window."""
+    dtstart = _ensure_datetime(event.get("DTSTART").dt, tz)
+    dtend = _ensure_datetime(event.get("DTEND").dt, tz)
+    rrule = event.get("RRULE")
 
     if not rrule:
-        # Not a recurring event
-        if start_date <= dtstart <= end_date:
-            return [(dtstart, dtend)]
-        return []
+        if window_start <= dtstart <= window_end:
+            yield (dtstart, dtend)
+        return
 
-    # Parse the recurrence rule
-    rrule_str = rrule.to_ical().decode('utf-8')
     duration = dtend - dtstart
-
-    # Generate occurrences
     try:
-        rule = rrulestr(rrule_str, dtstart=dtstart)
-        occurrences = []
-        for occurrence_start in rule:
-            if occurrence_start > end_date:
+        rule = rrulestr(rrule.to_ical().decode("utf-8"), dtstart=dtstart)
+        for occ in rule:
+            if occ > window_end:
                 break
-            if occurrence_start >= start_date:
-                occurrences.append((occurrence_start, occurrence_start + duration))
-        return occurrences
-    except Exception as e:
-        print(f"Warning: Could not parse recurrence rule: {e}", file=sys.stderr)
-        # Fall back to single occurrence
-        if start_date <= dtstart <= end_date:
-            return [(dtstart, dtend)]
-        return []
+            if occ >= window_start:
+                yield (occ, occ + duration)
+    except Exception:
+        log.warning("Could not parse recurrence rule for %s", event.get("SUMMARY", "?"))
+        if window_start <= dtstart <= window_end:
+            yield (dtstart, dtend)
 
 
-def get_busy_times(cal: Calendar, start_date: datetime, end_date: datetime) -> List[Tuple[datetime, datetime]]:
-    """Extract all busy time periods from the calendar."""
-    busy_times = []
-
+def collect_busy_times(
+    cal: Calendar, window_start: datetime, window_end: datetime, tz: ZoneInfo
+) -> list[Interval]:
+    """Return sorted busy intervals from *cal* within the given window."""
+    busy: list[Interval] = []
     for component in cal.walk():
         if component.name == "VEVENT":
             try:
-                busy_times.extend(expand_recurring_events(component, start_date, end_date))
-            except Exception as e:
-                print(f"Warning: Could not process event: {e}", file=sys.stderr)
-
-    # Sort by start time
-    busy_times.sort(key=lambda x: x[0])
-    return busy_times
+                busy.extend(_expand_event(component, window_start, window_end, tz))
+            except Exception:
+                log.warning("Skipping unparseable event: %s", component.get("SUMMARY", "?"))
+    busy.sort(key=lambda iv: iv[0])
+    return busy
 
 
-def merge_overlapping_intervals(intervals: List[Tuple[datetime, datetime]]) -> List[Tuple[datetime, datetime]]:
-    """Merge overlapping time intervals."""
-    if not intervals:
-        return []
-
-    merged = [intervals[0]]
-
-    for current_start, current_end in intervals[1:]:
-        last_start, last_end = merged[-1]
-
-        if current_start <= last_end:
-            # Overlapping or adjacent intervals
-            merged[-1] = (last_start, max(last_end, current_end))
+# ---------------------------------------------------------------------------
+# Interval arithmetic
+# ---------------------------------------------------------------------------
+def merge_intervals(intervals: Iterable[Interval]) -> list[Interval]:
+    """Merge overlapping or adjacent intervals (input must be sorted)."""
+    merged: list[Interval] = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
-            merged.append((current_start, current_end))
-
+            merged.append((start, end))
     return merged
 
 
-def generate_working_hours(start_date: datetime, end_date: datetime) -> List[Tuple[datetime, datetime]]:
-    """Generate all working hour blocks (Mon-Fri, 13:30-17:00)."""
-    working_blocks = []
-    current_date = start_date.date()
-    end = end_date.date()
-    tz = start_date.tzinfo or DEFAULT_TZ
-
-    while current_date <= end:
-        # Skip weekends (5=Saturday, 6=Sunday)
-        if current_date.weekday() < 5:
-            work_start = datetime.combine(current_date, WORK_START_TIME, tzinfo=tz)
-            work_end = datetime.combine(current_date, WORK_END_TIME, tzinfo=tz)
-            working_blocks.append((work_start, work_end))
-        current_date += timedelta(days=1)
-
-    return working_blocks
+def _working_hours(
+    start_date: datetime, end_date: datetime, cfg: Config
+) -> Generator[Interval, None, None]:
+    """Yield one (start, end) working-hour block per weekday in the range."""
+    day = start_date.date()
+    last = end_date.date()
+    while day <= last:
+        if day.weekday() < 5:  # Mon-Fri
+            yield (
+                datetime.combine(day, cfg.work_start, tzinfo=cfg.tz),
+                datetime.combine(day, cfg.work_end, tzinfo=cfg.tz),
+            )
+        day += timedelta(days=1)
 
 
-def calculate_availability_start_date(base_date: datetime) -> datetime:
-    """Calculate availability start date as today + AVAILABILITY_LEAD_DAYS working days.
+def add_working_days(base: datetime, n: int) -> datetime:
+    """Advance *base* by *n* working days (skipping weekends).
 
-    Working days exclude weekends (Saturday and Sunday).
-
-    Examples (with AVAILABILITY_LEAD_DAYS=3):
-        - If today is Tuesday -> Friday (Tue+1=Wed, Wed+1=Thu, Thu+1=Fri)
-        - If today is Saturday -> Wednesday (skip Sat/Sun, Mon+1=Tue, Tue+1=Wed)
-        - If today is Sunday -> Wednesday (skip Sun, Mon+1=Tue, Tue+1=Wed)
+    Examples (with n=3):
+        Tuesday  → Friday   (Wed, Thu, Fri)
+        Saturday → Wednesday (Mon, Tue, Wed)
+        Sunday   → Wednesday (Mon, Tue, Wed)
     """
-    current = base_date.date()
-    working_days_added = 0
-
-    while working_days_added < AVAILABILITY_LEAD_DAYS:
+    current = base.date()
+    added = 0
+    while added < n:
         current += timedelta(days=1)
         if current.weekday() < 5:
-            working_days_added += 1
-
-    # Return as datetime at start of day with timezone
-    return datetime.combine(current, time.min, tzinfo=base_date.tzinfo)
+            added += 1
+    return datetime.combine(current, time.min, tzinfo=base.tzinfo)
 
 
-def compute_available_slots(working_blocks: List[Tuple[datetime, datetime]],
-                           busy_times: List[Tuple[datetime, datetime]],
-                           min_duration_minutes: int = 44) -> List[Tuple[datetime, datetime]]:
-    """Compute available time slots by subtracting busy times from working hours.
+def compute_available_slots(
+    working_blocks: Sequence[Interval],
+    busy_times: Sequence[Interval],
+    cfg: Config,
+) -> list[Interval]:
+    """Subtract buffered busy times from working blocks.
 
-    Args:
-        working_blocks: List of working hour time blocks
-        busy_times: List of busy time periods
-        min_duration_minutes: Minimum duration in minutes for a slot to be included (default: 44)
-
-    Returns:
-        List of available time slots that meet the minimum duration requirement
+    Returns available intervals whose duration strictly exceeds
+    *cfg.min_slot_minutes*.
     """
     if not working_blocks:
         return []
 
-    # Merge overlapping busy times
-    busy_times = merge_overlapping_intervals(busy_times)
-    
-    if not busy_times:
-        # No busy times: all working blocks are available (if they meet min duration)
-        min_duration = timedelta(minutes=min_duration_minutes)
-        return [(start, end) for start, end in working_blocks if end - start > min_duration]
+    # Expand busy times by the buffer on each side, then merge.
+    buffer = timedelta(minutes=cfg.buffer_minutes)
+    if buffer:
+        padded = sorted(
+            ((s - buffer, e + buffer) for s, e in busy_times),
+            key=lambda iv: iv[0],
+        )
+    else:
+        padded = sorted(busy_times, key=lambda iv: iv[0])
+    merged_busy = merge_intervals(padded)
 
-    # Pre-compute for binary search
-    busy_starts = [b[0] for b in busy_times]
-    min_duration = timedelta(minutes=min_duration_minutes)
-    available_slots = []
+    min_dur = timedelta(minutes=cfg.min_slot_minutes)
+
+    if not merged_busy:
+        return [(s, e) for s, e in working_blocks if e - s > min_dur]
+
+    busy_starts = [iv[0] for iv in merged_busy]
+    slots: list[Interval] = []
 
     for work_start, work_end in working_blocks:
-        # Find first busy slot that might overlap with this working block
-        # We want busy slots where busy_end > work_start
-        idx = bisect_left(busy_starts, work_start)
-        # Check the previous slot too, as it might extend into our work block
-        if idx > 0:
-            idx -= 1
+        idx = max(bisect_left(busy_starts, work_start) - 1, 0)
+        cursor = work_start
 
-        current_start = work_start
+        while idx < len(merged_busy):
+            b_start, b_end = merged_busy[idx]
 
-        while idx < len(busy_times):
-            busy_start, busy_end = busy_times[idx]
-            
-            # If busy time is completely after current work block, we're done
-            if busy_start >= work_end:
+            if b_start >= work_end:
                 break
-
-            # If busy time is completely before current position, skip it
-            if busy_end <= current_start:
+            if b_end <= cursor:
                 idx += 1
                 continue
 
-            # If there's a gap between current position and busy start
-            if current_start < busy_start:
-                slot_end = min(busy_start, work_end)
-                if slot_end - current_start > min_duration:
-                    available_slots.append((current_start, slot_end))
+            # Free gap before this busy block
+            if cursor < b_start:
+                gap_end = min(b_start, work_end)
+                if gap_end - cursor > min_dur:
+                    slots.append((cursor, gap_end))
 
-            # Move current position to after the busy time
-            current_start = max(current_start, busy_end)
+            cursor = max(cursor, b_end)
             idx += 1
 
-        # Add remaining time in work block if any
-        if current_start < work_end and work_end - current_start > min_duration:
-            available_slots.append((current_start, work_end))
+        # Trailing free time
+        if cursor < work_end and work_end - cursor > min_dur:
+            slots.append((cursor, work_end))
 
-    return available_slots
+    return slots
 
 
-def create_availability_calendar(available_slots: List[Tuple[datetime, datetime]]) -> Calendar:
-    """Create a new ICS calendar with available time slots."""
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+def build_availability_calendar(slots: Sequence[Interval]) -> Calendar:
+    """Create a new ICS calendar advertising the given available slots."""
     cal = Calendar()
-    cal.add('prodid', '-//Available Timeslots//bzg//')
-    cal.add('version', '2.0')
-    cal.add('calscale', 'GREGORIAN')
-    cal.add('x-wr-calname', 'Available Slots')
-    cal.add('x-wr-timezone', 'Europe/Paris')
+    cal.add("prodid", "-//Available Timeslots//bzg//")
+    cal.add("version", "2.0")
+    cal.add("calscale", "GREGORIAN")
+    cal.add("x-wr-calname", "Available Slots")
+    cal.add("x-wr-timezone", "Europe/Paris")
 
-    now = datetime.now(ZoneInfo('UTC'))
-    
-    for idx, (start, end) in enumerate(available_slots):
+    now = datetime.now(ZoneInfo("UTC"))
+
+    for idx, (start, end) in enumerate(slots):
         event = Event()
-        event.add('summary', 'Available')
-        event.add('dtstart', start)
-        event.add('dtend', end)
-        event.add('dtstamp', now)
-        event.add('uid', f'available-{idx}-{start.strftime("%Y%m%d%H%M%S")}@bzg')
-        event.add('status', 'TENTATIVE')
-        event.add('transp', 'TRANSPARENT')
+        event.add("summary", "Available")
+        event.add("dtstart", start)
+        event.add("dtend", end)
+        event.add("dtstamp", now)
+        event.add("uid", f"available-{idx}-{start:%Y%m%d%H%M%S}@bzg")
+        event.add("status", "TENTATIVE")
+        event.add("transp", "TRANSPARENT")
         cal.add_component(event)
 
     return cal
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python compute_availability.py <input.ics> [output.ics] [weeks_ahead]", file=sys.stderr)
-        print("\nDefaults:", file=sys.stderr)
-        print("  output.ics = stdout (use '-' or omit for stdout)", file=sys.stderr)
-        print("  weeks_ahead = 4", file=sys.stderr)
-        print("\nExamples:", file=sys.stderr)
-        print("  python compute_availability.py input.ics              # Output to stdout, 4 weeks", file=sys.stderr)
-        print("  python compute_availability.py input.ics 8            # Output to stdout, 8 weeks", file=sys.stderr)
-        print("  python compute_availability.py input.ics out.ics     # Output to file, 4 weeks", file=sys.stderr)
-        print("  python compute_availability.py input.ics out.ics 8   # Output to file, 8 weeks", file=sys.stderr)
-        sys.exit(1)
+def print_summary(slots: Sequence[Interval], preview: int = 5) -> None:
+    """Log a human-friendly summary of the available slots."""
+    total_h = sum((e - s).total_seconds() / 3600 for s, e in slots)
+    log.info("Available slots: %d (%.1f h total)", len(slots), total_h)
+    for start, end in slots[:preview]:
+        dur = (end - start).total_seconds() / 3600
+        log.info(
+            "  • %s – %s (%.1fh)",
+            f"{start:%a %Y-%m-%d %H:%M}",
+            f"{end:%H:%M}",
+            dur,
+        )
 
-    input_file = sys.argv[1]
 
-    # Parse arguments intelligently
-    output_file = None
-    weeks_ahead = 4
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Compute available timeslots from an ICS calendar.",
+    )
+    p.add_argument("input", help="Input .ics file")
+    p.add_argument(
+        "output",
+        nargs="?",
+        default="-",
+        help="Output .ics file (default: stdout)",
+    )
+    p.add_argument(
+        "-w",
+        "--weeks",
+        type=int,
+        default=4,
+        help="How many weeks ahead to scan (default: 4)",
+    )
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Increase log verbosity",
+    )
+    return p.parse_args(argv)
 
-    if len(sys.argv) > 2:
-        second_arg = sys.argv[2]
-        try:
-            weeks_ahead = int(second_arg)
-        except ValueError:
-            output_file = second_arg if second_arg != '-' else None
 
-        if len(sys.argv) > 3:
-            weeks_ahead = int(sys.argv[3])
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    cfg = Config.from_env()
 
-    # Set up date range
-    today = datetime.now(DEFAULT_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = calculate_availability_start_date(today)
-    end_date = start_date + timedelta(weeks=weeks_ahead)
+    logging.basicConfig(
+        format="%(message)s",
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        stream=sys.stderr,
+    )
 
-    print(f"Today: {today.date()}", file=sys.stderr)
-    print(f"Availability starts on: {start_date.date()} (today + {AVAILABILITY_LEAD_DAYS} working days)", file=sys.stderr)
-    print(f"Processing calendar from {start_date.date()} to {end_date.date()}", file=sys.stderr)
+    today = datetime.now(cfg.tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_date = add_working_days(today, cfg.lead_days)
+    end_date = start_date + timedelta(weeks=args.weeks)
 
-    # Parse input calendar
-    print(f"Reading {input_file}...", file=sys.stderr)
-    cal = parse_ics(input_file)
+    log.info("Today:  %s", today.date())
+    log.info(
+        "Window: %s → %s (%d working-day lead)",
+        start_date.date(),
+        end_date.date(),
+        cfg.lead_days,
+    )
+    log.info(
+        "Hours:  %s–%s, buffer %d min, min slot %d min",
+        cfg.work_start.strftime("%H:%M"),
+        cfg.work_end.strftime("%H:%M"),
+        cfg.buffer_minutes,
+        cfg.min_slot_minutes,
+    )
 
-    # Get busy times
-    print("Extracting busy times...", file=sys.stderr)
-    busy_times = get_busy_times(cal, start_date, end_date)
-    print(f"Found {len(busy_times)} busy time slots", file=sys.stderr)
+    cal = parse_ics(args.input)
+    busy = collect_busy_times(cal, start_date, end_date, cfg.tz)
+    log.info("Busy slots found: %d", len(busy))
 
-    # Generate working hours
-    print("Generating working hours (Mon-Fri, 13:30-17:00)...", file=sys.stderr)
-    working_blocks = generate_working_hours(start_date, end_date)
-    print(f"Generated {len(working_blocks)} working hour blocks", file=sys.stderr)
+    working = list(_working_hours(start_date, end_date, cfg))
+    log.debug("Working blocks: %d", len(working))
 
-    # Compute available slots
-    print("Computing available slots (skipping slots ≤44 minutes)...", file=sys.stderr)
-    available_slots = compute_available_slots(working_blocks, busy_times)
-    print(f"Found {len(available_slots)} available time slots", file=sys.stderr)
+    available = compute_available_slots(working, busy, cfg)
+    print_summary(available)
 
-    # Create output calendar
-    print("Creating availability calendar...", file=sys.stderr)
-    availability_cal = create_availability_calendar(available_slots)
+    ical_data = build_availability_calendar(available).to_ical()
 
-    # Write to file or stdout
-    ical_data = availability_cal.to_ical()
-
-    if output_file is None:
+    if args.output == "-":
         sys.stdout.buffer.write(ical_data)
     else:
-        with open(output_file, 'wb') as f:
+        with open(args.output, "wb") as f:
             f.write(ical_data)
-
-        total_hours = sum((end - start).total_seconds() / 3600 for start, end in available_slots)
-        print(f"\n✓ Successfully created {output_file}", file=sys.stderr)
-        print(f"\nSummary:", file=sys.stderr)
-        print(f"  - Total available hours: {total_hours:.1f}h", file=sys.stderr)
-        print(f"  - Available slots: {len(available_slots)}", file=sys.stderr)
-
-        if available_slots:
-            print(f"\nNext few available slots:", file=sys.stderr)
-            for start, end in available_slots[:5]:
-                duration = (end - start).total_seconds() / 3600
-                print(f"  • {start.strftime('%a %Y-%m-%d %H:%M')} - {end.strftime('%H:%M')} ({duration:.1f}h)", file=sys.stderr)
+        log.info("✓ Written to %s", args.output)
 
 
 if __name__ == "__main__":
