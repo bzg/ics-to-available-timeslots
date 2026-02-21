@@ -36,8 +36,11 @@ class SlotEvent(NamedTuple):
 
     @property
     def duration_label(self) -> str:
-        hours = (self.end - self.start).total_seconds() / 3600
-        return f"{hours:.1f}h" if hours >= 1 else f"{int(hours * 60)}min"
+        total_min = int((self.end - self.start).total_seconds()) // 60
+        h, m = divmod(total_min, 60)
+        if h and m:
+            return f"{h}h{m:02d}m"
+        return f"{h}h" if h else f"{m}min"
 
     @property
     def time_range(self) -> str:
