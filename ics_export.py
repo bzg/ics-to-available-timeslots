@@ -21,6 +21,8 @@ from datetime import date, datetime, time, timedelta
 from typing import NamedTuple, Sequence
 from textwrap import dedent
 
+import zoneinfo
+
 from icalendar import Calendar
 
 log = logging.getLogger(__name__)
@@ -60,16 +62,22 @@ def parse_ics(source: str) -> Calendar:
     return Calendar.from_ical(data)
 
 
-def _normalize_dt(dt: datetime | date) -> datetime:
-    return dt if isinstance(dt, datetime) else datetime.combine(dt, time.min)
+def _normalize_dt(dt: datetime | date, tz: zoneinfo.ZoneInfo | None = None) -> datetime:
+    result = dt if isinstance(dt, datetime) else datetime.combine(dt, time.min)
+    if tz:
+        if result.tzinfo is not None:
+            result = result.astimezone(tz)
+        else:
+            result = result.replace(tzinfo=tz)
+    return result
 
 
-def extract_events(cal: Calendar) -> list[SlotEvent]:
+def extract_events(cal: Calendar, tz: zoneinfo.ZoneInfo | None = None) -> list[SlotEvent]:
     """Return sorted events from *cal*."""
     events = [
         SlotEvent(
-            start=_normalize_dt(c.get("DTSTART").dt),
-            end=_normalize_dt(c.get("DTEND").dt),
+            start=_normalize_dt(c.get("DTSTART").dt, tz),
+            end=_normalize_dt(c.get("DTEND").dt, tz),
             summary=str(c.get("SUMMARY", "Available")),
         )
         for c in cal.walk()
@@ -241,7 +249,7 @@ def _render_events_html(events: Sequence[SlotEvent]) -> str:
     return "\n".join(parts)
 
 
-def render_html(events: Sequence[SlotEvent], title: str) -> str:
+def render_html(events: Sequence[SlotEvent], title: str, tz_name: str = "Europe/Paris") -> str:
     """Render a full HTML page."""
     ical_url = os.environ.get("ICAL_URL", "https://bzg.fr/agenda.ics")
     visio_url = os.environ.get(
@@ -266,7 +274,8 @@ def render_html(events: Sequence[SlotEvent], title: str) -> str:
             <header>
                 <h1>{safe_title}</h1>
                 <p><strong><a href="{html.escape(ical_url)}">iCal file</a> \
-    - <a href="{html.escape(visio_url)}">Visio link</a></strong></p>
+    - <a href="{html.escape(visio_url)}">Visio link</a> \
+    - {html.escape(tz_name)}</strong></p>
             </header>
     {events_html}
             <footer>
@@ -324,6 +333,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help='Title (default: $TITLE or "Available Time Slots")',
     )
+    p.add_argument(
+        "-z",
+        "--tz",
+        default=None,
+        help='Timezone (default: $TZ or "Europe/Paris")',
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -338,15 +353,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     title = args.title or os.environ.get("TITLE", "Available Time Slots")
+    tz_name = args.tz or os.environ.get("TZ", "Europe/Paris")
+    tz = zoneinfo.ZoneInfo(tz_name)
 
     log.info("Reading %s…", args.input)
     cal = parse_ics(args.input)
 
-    events = extract_events(cal)
+    events = extract_events(cal, tz)
     log.info("Found %d events", len(events))
 
     render = _RENDERERS[args.fmt]
-    content = render(events, title)
+    content = render(events, title, tz_name) if args.fmt == "html" else render(events, title)
 
     if args.output == "-":
         sys.stdout.write(content)
